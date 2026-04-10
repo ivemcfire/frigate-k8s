@@ -160,7 +160,8 @@ frigate-k8s/
 kubectl apply -f namespace.yaml
 
 # Create secrets (not tracked in git)
-kubectl create secret generic frigate-rtsp-creds \
+# Use a leading space to prevent bash history logging (requires HISTCONTROL=ignorespace)
+ kubectl create secret generic frigate-rtsp-creds \
   --from-literal=reolink-password='YOUR_PASSWORD' -n frigate
 
 # Deploy everything
