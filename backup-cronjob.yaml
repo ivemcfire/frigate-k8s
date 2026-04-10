@@ -1,0 +1,61 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: frigate-backup
+  namespace: frigate
+spec:
+  schedule: "0 2 * * *"        # 2:00 AM daily
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid     # don't overlap if a sync runs long
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 14400  # 4h max — safety net for large syncs
+      template:
+        spec:
+          nodeSelector:
+            kubernetes.io/hostname: k3master
+          restartPolicy: Never
+          containers:
+            - name: backup
+              image: alpine:3.20
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  apk add --no-cache openssh-client rsync >/dev/null 2>&1
+
+                  SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -i /ssh/id_ed25519"
+                  SRC="/data/"
+                  DEST="user@192.168.100.152:/mnt/frigate/"
+
+                  echo "[$(date)] Starting rsync mirror to jumphost..."
+
+                  # Incremental sync — only transfers new/changed files
+                  # --delete removes files on backup that Frigate already purged
+                  # --exclude model_cache (re-downloadable, ~100MB)
+                  rsync -avz --delete \
+                    --exclude='model_cache/' \
+                    --rsync-path=/usr/bin/rsync \
+                    -e "ssh ${SSH_OPTS}" \
+                    "${SRC}" "${DEST}"
+
+                  echo "[$(date)] Rsync mirror complete."
+              volumeMounts:
+                - name: frigate-data
+                  mountPath: /data
+                  readOnly: true
+                - name: ssh-key
+                  mountPath: /ssh
+                  readOnly: true
+          volumes:
+            - name: frigate-data
+              hostPath:
+                path: /mnt/frigate
+                type: Directory
+            - name: ssh-key
+              secret:
+                secretName: jumphost-ssh-key
+                defaultMode: 0400

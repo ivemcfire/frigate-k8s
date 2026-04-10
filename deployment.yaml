@@ -1,0 +1,180 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frigate
+  namespace: frigate
+  labels:
+    app: frigate
+spec:
+  replicas: 1                    # NVR is stateful — only ever 1 replica
+  strategy:
+    type: Recreate               # Not RollingUpdate — can't have 2 Frigates
+                                 # fighting over the same config DB and recordings
+  selector:
+    matchLabels:
+      app: frigate
+  template:
+    metadata:
+      labels:
+        app: frigate
+    spec:
+      # --- Pin to k3master ---
+      # Video decode is CPU-heavy. Phones can't handle it.
+      # nodeSelector is the simplest way to pin a pod to a specific node.
+      # (nodeAffinity is more flexible but overkill here)
+      nodeSelector:
+        kubernetes.io/hostname: k3master
+
+      # RBAC identity — allows the sidecar to patch the ConfigMap
+      serviceAccountName: frigate-config-updater
+
+      # GID 993 = render group on k3master — needed for /dev/dri/renderD128 access
+      securityContext:
+        supplementalGroups: [993]
+
+      # --- Init Container ---
+      # Seeds the hostPath with config.yml from the ConfigMap on first boot.
+      # On subsequent restarts, the file already exists so the seed is skipped.
+      # This ensures the ConfigMap remains the initial source of truth,
+      # but the hostPath (writable) takes over after first deployment.
+      initContainers:
+        - name: seed-config
+          image: busybox:latest
+          command: ['sh', '-c']
+          args:
+            - |
+              if [ ! -s /config/config.yml ]; then
+                echo "Seeding hostPath with ConfigMap data (missing or empty)..."
+                cp /tmp/initial-config/config.yml /config/config.yml
+              else
+                echo "Config already exists on hostPath. Skipping seed."
+              fi
+          volumeMounts:
+            - name: config-db
+              mountPath: /config
+            - name: initial-configmap
+              mountPath: /tmp/initial-config
+
+      containers:
+        - name: frigate
+          image: ghcr.io/blakeblackshear/frigate:0.17.1
+          ports:
+            - name: web
+              containerPort: 5000    # Frigate Web UI
+            - name: rtsp
+              containerPort: 8554    # go2rtc RTSP restream
+            - name: webrtc
+              containerPort: 8555    # go2rtc WebRTC (live view in browser)
+
+          # --- Resource Management ---
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              memory: 3Gi
+
+          # --- GPU Access ---
+          # Intel UHD (Ice Lake i5-1035G1) — VA-API hardware video decode
+          securityContext:
+            privileged: true
+          # --- Volume Mounts ---
+          volumeMounts:
+            # Intel GPU render device for VA-API hardware decode
+            - name: dri
+              mountPath: /dev/dri
+
+            # Frigate's config directory — writable (DB + config.yml live here)
+            # hostPath so the SQLite DB persists across pod restarts.
+            # config.yml also lives here now (no longer overlaid by ConfigMap).
+            # Frigate UI writes directly to this path on "Save & Restart".
+            - name: config-db
+              mountPath: /config
+
+            # Recordings and clips — our 2TB USB drive
+            - name: media
+              mountPath: /media/frigate
+
+            # Shared memory — Frigate uses /dev/shm for frame buffering
+            - name: shm
+              mountPath: /dev/shm
+
+          # --- Environment ---
+          env:
+            - name: TZ
+              value: "Europe/Sofia"
+            - name: LIBVA_DRIVER_NAME
+              value: "iHD"
+            - name: FRIGATE_REOLINK_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: frigate-rtsp-creds
+                  key: reolink-password
+
+        # --- Write-Back Sidecar ---
+        # Watches /config/config.yml for changes made by the Frigate UI.
+        # When a change is detected, pushes the new config back to the
+        # Kubernetes ConfigMap so the cluster API stays in sync.
+        # Does NOT trigger a pod restart — Frigate handles its own reload.
+        - name: config-sync
+          image: bitnami/kubectl:latest
+          command: ['/bin/sh', '-c']
+          args:
+            - |
+              echo "Write-back sidecar starting..."
+              LAST_HASH=""
+              while true; do
+                CURRENT_HASH=$(md5sum /config/config.yml 2>/dev/null | awk '{print $1}')
+                if [ -n "$CURRENT_HASH" ] && [ "$LAST_HASH" != "$CURRENT_HASH" ]; then
+                  if [ -n "$LAST_HASH" ]; then
+                    echo "$(date): Config change detected. Syncing to ConfigMap..."
+                    kubectl create configmap frigate-config \
+                      --from-file=config.yml=/config/config.yml \
+                      -n frigate -o yaml --dry-run=client | kubectl apply -f -
+                    echo "$(date): ConfigMap updated."
+                  fi
+                  LAST_HASH=$CURRENT_HASH
+                fi
+                sleep 5
+              done
+          resources:
+            requests:
+              cpu: "10m"
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: config-db
+              mountPath: /config
+              readOnly: true
+
+      # --- Volumes ---
+      volumes:
+        # Intel GPU device for VA-API
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
+
+        # ConfigMap — used only by init container for initial seeding
+        - name: initial-configmap
+          configMap:
+            name: frigate-config
+
+        # hostPath for Frigate's config dir (DB + config.yml)
+        - name: config-db
+          hostPath:
+            path: /mnt/frigate/config
+            type: DirectoryOrCreate
+
+        # hostPath for recordings — our 2TB USB drive
+        - name: media
+          hostPath:
+            path: /mnt/frigate
+            type: Directory
+
+        # tmpfs for shared memory
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi

@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: frigate
+  namespace: frigate
+  labels:
+    app: frigate
+  annotations:
+    # Pin to a specific IP from the MetalLB pool.
+    # Without this, MetalLB auto-assigns the next free IP — which could
+    # change on service recreation. For infrastructure services like an NVR,
+    # you want a stable IP that you can bookmark / add to DNS.
+    metallb.universe.tf/loadBalancerIPs: "192.168.100.211"
+spec:
+  type: LoadBalancer
+  selector:
+    app: frigate              # matches pod labels from deployment
+  ports:
+    - name: web
+      port: 5000              # Frigate Web UI
+      targetPort: 5000
+      protocol: TCP
+    - name: rtsp
+      port: 8554              # RTSP restream — VLC/other apps can pull streams
+      targetPort: 8554
+      protocol: TCP
+    - name: webrtc-tcp
+      port: 8555              # WebRTC — low-latency live view in browser
+      targetPort: 8555
+      protocol: TCP

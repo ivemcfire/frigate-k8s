@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: frigate-config-updater
+  namespace: frigate
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: configmap-updater
+  namespace: frigate
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["frigate-config"]
+  verbs: ["get", "patch", "update"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: frigate-config-updater-binding
+  namespace: frigate
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: configmap-updater
+subjects:
+- kind: ServiceAccount
+  name: frigate-config-updater
+  namespace: frigate

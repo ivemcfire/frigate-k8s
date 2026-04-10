@@ -1,0 +1,292 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frigate-config
+  namespace: frigate
+data:
+  config.yml: |
+    # ===========================================
+    # Frigate NVR Configuration — k3master homelab
+    # ===========================================
+
+    # --- MQTT ---
+    # Frigate publishes detection events here.
+    # Reusing the existing Mosquitto broker in the hydroflow namespace.
+    # Why cluster DNS? Because the pod runs in a different namespace (frigate),
+    # but K8s DNS lets any pod reach any service via <svc>.<ns>.svc.cluster.local
+    mqtt:
+      host: mosquitto.hydroflow.svc.cluster.local
+      port: 1883
+
+    # --- go2rtc ---
+    # Handles RTSP intake and restreaming. Each camera gets a main + sub stream.
+    # Frigate never decodes the main stream for detection — only the sub stream.
+    # The main stream is passed through (no re-encode) to recordings when triggered.
+    go2rtc:
+      streams:
+        # XMeye cameras (.11-.16) — NETSurveillance protocol
+        cam01:
+          - rtsp://admin:@192.168.100.11:554/user=admin&password=&channel=1&stream=0.sdp
+        cam01_sub:
+          - rtsp://admin:@192.168.100.11:554/user=admin&password=&channel=1&stream=1.sdp
+        cam02:
+          - rtsp://admin:@192.168.100.12:554/user=admin&password=&channel=1&stream=0.sdp
+        cam02_sub:
+          - rtsp://admin:@192.168.100.12:554/user=admin&password=&channel=1&stream=1.sdp
+        cam03:
+          - rtsp://admin:@192.168.100.13:554/user=admin&password=&channel=1&stream=0.sdp
+        cam03_sub:
+          - rtsp://admin:@192.168.100.13:554/user=admin&password=&channel=1&stream=1.sdp
+        cam04:
+          - rtsp://admin:@192.168.100.14:554/user=admin&password=&channel=1&stream=0.sdp
+        cam04_sub:
+          - rtsp://admin:@192.168.100.14:554/user=admin&password=&channel=1&stream=1.sdp
+        cam05:
+          - rtsp://admin:@192.168.100.15:554/user=admin&password=&channel=1&stream=0.sdp
+        cam05_sub:
+          - rtsp://admin:@192.168.100.15:554/user=admin&password=&channel=1&stream=1.sdp
+        cam06:
+          - rtsp://admin:@192.168.100.16:554/user=admin&password=&channel=1&stream=0.sdp
+        cam06_sub:
+          - rtsp://admin:@192.168.100.16:554/user=admin&password=&channel=1&stream=1.sdp
+
+        # Reolink (.17) — 4K main (H.265), sub (H.264). TCP required.
+        cam07:
+          - rtsp://admin:{FRIGATE_REOLINK_PASSWORD}@192.168.100.17:554/h264Preview_01_main
+        cam07_sub:
+          - rtsp://admin:{FRIGATE_REOLINK_PASSWORD}@192.168.100.17:554/h264Preview_01_sub
+        # cam07_detect removed — go2rtc transcode too CPU-heavy
+
+        # Xiaomi Yi (.19) — yi-hack firmware, no auth
+        cam08:
+          - rtsp://192.168.100.19:554/ch0_0.h264
+        cam08_sub:
+          - rtsp://192.168.100.19:554/ch0_1.h264
+
+    # --- FFmpeg Hardware Acceleration ---
+    # Intel UHD Graphics (Ice Lake i5-1035G1) via QSV
+    ffmpeg:
+      hwaccel_args: preset-intel-qsv-h264
+
+    # --- Detection ---
+    # CPU-based TensorFlow Lite. No Coral TPU.
+    # Detection inference stays on CPU — hwaccel only affects video decode.
+    detectors:
+      cpu:
+        type: cpu
+        num_threads: 4
+
+    # --- Face Recognition ---
+    # Built-in Frigate 0.17 feature. Uses person detection snapshots
+    # to identify known faces. Faces are stored in /config/clips/faces.
+    # Only enabled on cam07_reolink (4K — best resolution for face matching).
+    face_recognition:
+      enabled: true
+      model_size: small
+      min_area: 1500
+      detection_threshold: 0.4
+
+    # --- Camera Defaults ---
+    # Applied to all cameras unless overridden per-camera.
+    # This keeps the config DRY — Don't Repeat Yourself.
+    objects:
+      track:
+        - person
+      filters:
+        person:
+          min_score: 0.5
+          threshold: 0.7
+
+    record:
+      enabled: true
+      # Frigate 0.15 splits recording into categories:
+      #   continuous — always recording (we don't want this)
+      #   motion — record on motion (less specific)
+      #   alerts — record when tracked object triggers alert zone
+      #   detections — record when a tracked object (person) is detected
+      continuous:
+        days: 0              # no 24/7 recording — saves disk
+      motion:
+        days: 0              # no motion-only recording
+      detections:
+        pre_capture: 5       # record 5s BEFORE person detected
+        post_capture: 10     # record 10s AFTER person leaves
+        retain:
+          days: 90           # keep detection clips for 90 days
+          mode: motion       # retain motion segments within the event
+
+    snapshots:
+      enabled: true
+      retain:
+        default: 90          # keep snapshots 90 days
+
+    # --- Cameras ---
+    cameras:
+      # ---- XMeye cameras (NETSurveillance) ----
+      cam01:
+        enabled: true
+        ffmpeg:
+          inputs:
+            - path: rtsp://127.0.0.1:8554/cam01        # main via go2rtc (720p)
+              roles: [record]
+            - path: rtsp://127.0.0.1:8554/cam01_sub    # sub via go2rtc (640x480)
+              roles: [detect]
+        detect:
+          enabled: true
+          width: 640
+          height: 480
+          fps: 5
+        onvif:
+          host: 192.168.100.11
+          port: 8899
+          user: admin
+          password: ""
+
+      cam02:
+        enabled: true
+        ffmpeg:
+          inputs:
+            - path: rtsp://127.0.0.1:8554/cam02
+              roles: [record]
+            - path: rtsp://127.0.0.1:8554/cam02_sub
+              roles: [detect]
+        detect:
+          enabled: true
+          width: 640
+          height: 480
+          fps: 5
+        onvif:
+          host: 192.168.100.12
+          port: 8899
+          user: admin
+          password: ""
+
+      cam03:
+        enabled: true
+        ffmpeg:
+          inputs:
+            - path: rtsp://127.0.0.1:8554/cam03
+              roles: [record]
+            - path: rtsp://127.0.0.1:8554/cam03_sub
+              roles: [detect]
+        detect:
+          enabled: true
+          width: 640
+          height: 480
+          fps: 5
+        onvif:
+          host: 192.168.100.13
+          port: 8899
+          user: admin
+          password: ""
+
+      cam04:
+        enabled: false       # offline — enable when camera is back
+        ffmpeg:
+          inputs:
+            - path: rtsp://127.0.0.1:8554/cam04
+              roles: [record]
+            - path: rtsp://127.0.0.1:8554/cam04_sub
+              roles: [detect]
+        detect:
+          enabled: true
+          width: 640
+          height: 480
+          fps: 5
+        onvif:
+          host: 192.168.100.14
+          port: 8899
+          user: admin
+          password: ""
+
+      cam05:
+        enabled: false       # offline — enable when camera is back
+        ffmpeg:
+          inputs:
+            - path: rtsp://127.0.0.1:8554/cam05
+              roles: [record]
+            - path: rtsp://127.0.0.1:8554/cam05_sub
+              roles: [detect]
+        detect:
+          enabled: true
+          width: 640
+          height: 480
+          fps: 5
+        onvif:
+          host: 192.168.100.15
+          port: 8899
+          user: admin
+          password: ""
+
+      cam06:
+        enabled: false       # offline — enable when camera is back
+        ffmpeg:
+          inputs:
+            - path: rtsp://127.0.0.1:8554/cam06
+              roles: [record]
+            - path: rtsp://127.0.0.1:8554/cam06_sub
+              roles: [detect]
+        detect:
+          enabled: true
+          width: 640
+          height: 480
+          fps: 5
+        onvif:
+          host: 192.168.100.16
+          port: 8899
+          user: admin
+          password: ""
+
+      # ---- Reolink (4K, TCP only, face recognition enabled) ----
+      # ---- Reolink (4K Main Stream forced for Detection) ----
+      cam07_reolink:
+        enabled: true
+        ffmpeg:
+          hwaccel_args: preset-intel-qsv-h265          # Explicitly set to H.265
+          inputs:
+            - path: rtsp://127.0.0.1:8554/cam07        # 4K at 25 FPS
+              input_args: -rtsp_transport tcp
+              roles:
+                - record
+                - detect                               # AI runs on the main stream
+        detect:
+          enabled: true
+          width: 1280                                  # Downscale 4K to 720p via QSV
+          height: 720
+          fps: 5                                       # Frigate will drop 20 frames and analyze 5 per second
+        objects:
+          track:
+            - person
+        snapshots:
+          enabled: true
+        onvif:
+          host: 192.168.100.17
+          port: 8000
+
+      # ---- Xiaomi Yi (yi-hack) ----
+      cam08_yicam:
+        enabled: true
+        ffmpeg:
+          inputs:
+            - path: rtsp://127.0.0.1:8554/cam08
+              roles: [record]
+            - path: rtsp://127.0.0.1:8554/cam08_sub
+              roles: [detect]
+        detect:
+          enabled: true
+          width: 640
+          height: 480
+          fps: 5
+        # Yi cameras via yi-hack don't support ONVIF — no PTZ control
+        motion:
+          threshold: 40        # default 25 — higher = less sensitive, reduces IR noise & insect triggers
+          contour_area: 20     # default 10 — ignore tiny motion blobs (bugs, IR flicker)
+          improve_contrast: false  # disabled — at night this amplifies grain/noise, not useful
+        objects:
+          track:
+            - person
+          filters:
+            person:
+              min_score: 0.65  # global default 0.5 — require higher confidence before tracking
+              threshold: 0.80  # global default 0.7 — require higher sustained confidence for alert
+              min_area: 4000   # ignore tiny person-shaped blobs from IR artifacts
